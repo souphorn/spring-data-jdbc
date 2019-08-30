@@ -227,11 +227,15 @@ public class AggregateChangeUnitTests {
 
 	PersistentPropertyPath<RelationalPersistentProperty> toPath(DummyEntity root, Object pathValue) {
 		// DefaultPersistentPropertyPath is package-public
-		return new WritingContext(context, entity, new AggregateChange<>(AggregateChange.Kind.SAVE, DummyEntity.class, root))
-			.insert().stream().filter(a -> a instanceof DbAction.Insert).map(DbAction.Insert.class::cast)
-			.filter(a -> a.getEntity() == pathValue)
-			.map(DbAction.Insert::getPropertyPath)
-			.findFirst().orElse(null);
+		AggregateChange<DummyEntity> aggregateChange = new AggregateChange<>(AggregateChange.Kind.SAVE, DummyEntity.class, root);
+
+		return new WritingContext(context, entity,
+				aggregateChange) //
+						.insert().stream() //
+						.filter(a -> a instanceof DbAction.Insert).map(DbAction.Insert.class::cast) //
+						.filter(a -> a.getEntity() == pathValue) //
+						.map(DbAction.Insert::getPropertyPath) //
+			.findFirst().orElseThrow(() -> new RuntimeException("No path found"));
 	}
 
 	private static class DummyEntity {

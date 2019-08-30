@@ -597,6 +597,23 @@ public class JdbcAggregateTemplateIntegrationTests {
 		});
 	}
 
+	@Test // DATAJDBC-291
+	public void indexCreationOfEntitiesNestedInCollection() {
+
+		WithNestedIds withNestedIds = new WithNestedIds();
+		withNestedIds.manuals.add(new Manual());
+		withNestedIds.manuals.get(0).content = "Content 0";
+		withNestedIds.manuals.add(new Manual());
+		withNestedIds.manuals.get(1).content = "Content 1";
+
+		template.save(withNestedIds);
+
+		assertThat(withNestedIds.manuals) //
+				.allMatch(m -> m.id > 0, "id must be set")
+				.extracting(Manual::getContent) //
+				.containsExactly("Content 0", "Content 1");
+	}
+
 	private static NoIdMapChain4 createNoIdMapTree() {
 
 		NoIdMapChain4 chain4 = new NoIdMapChain4();
@@ -853,6 +870,13 @@ public class JdbcAggregateTemplateIntegrationTests {
 		@Id Long four;
 		String fourValue;
 		Map<String, NoIdMapChain3> chain3 = new HashMap<>();
+	}
+
+	@Data
+	static class WithNestedIds {
+		@Id Long id;
+		List<Manual> manuals = new ArrayList<>();
+		String content;
 	}
 
 	@Configuration

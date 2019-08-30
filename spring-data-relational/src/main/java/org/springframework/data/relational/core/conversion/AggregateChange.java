@@ -15,15 +15,21 @@
  */
 package org.springframework.data.relational.core.conversion;
 
+import static org.springframework.data.relational.core.conversion.AggregateChange.HandlerFactory.*;
+
 import lombok.Getter;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.BiFunction;
+import java.util.function.Function;
 
+import org.springframework.data.mapping.PersistentProperty;
 import org.springframework.data.mapping.PersistentPropertyAccessor;
 import org.springframework.data.mapping.PersistentPropertyPath;
+import org.springframework.data.mapping.TraversalContext;
 import org.springframework.data.relational.core.mapping.PersistentPropertyPathExtension;
 import org.springframework.data.relational.core.mapping.RelationalMappingContext;
 import org.springframework.data.relational.core.mapping.RelationalPersistentEntity;
@@ -48,6 +54,8 @@ public class AggregateChange<T> {
 	/** Aggregate root, to which the change applies, if available */
 	@Nullable private T entity;
 
+	static {}
+
 	public AggregateChange(Kind kind, Class<T> entityType, @Nullable T entity) {
 
 		this.kind = kind;
@@ -55,108 +63,68 @@ public class AggregateChange<T> {
 		this.entity = entity;
 	}
 
-	@SuppressWarnings("unchecked")
 	static void setIdOfNonRootEntity(RelationalMappingContext context, RelationalConverter converter,
 			PersistentPropertyAccessor<?> propertyAccessor, DbAction.WithDependingOn<?> action, Object generatedId) {
 
 		PersistentPropertyPath<RelationalPersistentProperty> propertyPathToEntity = action.getPropertyPath();
 		PersistentPropertyPathExtension extPath = new PersistentPropertyPathExtension(context, propertyPathToEntity);
 
-		RelationalPersistentProperty leafProperty = propertyPathToEntity.getRequiredLeafProperty();
+		TraversalContext traversalContext = createTraversalContext(action);
 
-		Object currentPropertyValue = propertyAccessor.getProperty(propertyPathToEntity);
+		Object currentPropertyValue = propertyAccessor.getProperty(propertyPathToEntity, traversalContext);
 		Assert.notNull(currentPropertyValue, "Trying to set an ID for an element that does not exist");
 
-		if (leafProperty.isQualified()) {
+		if (extPath.hasIdProperty()) {
 
-			Object keyObject = action.getQualifiers().get(propertyPathToEntity);
+			RelationalPersistentProperty requiredIdProperty = extPath.getRequiredIdProperty();
 
-			if (List.class.isAssignableFrom(leafProperty.getType())) {
-				setIdInElementOfList(converter, action, generatedId, (List) currentPropertyValue, (int) keyObject);
-			} else if (Map.class.isAssignableFrom(leafProperty.getType())) {
-				setIdInElementOfMap(converter, action, generatedId, (Map) currentPropertyValue, keyObject);
-			} else {
-				throw new IllegalStateException("Can't handle " + currentPropertyValue);
-			}
-		} else if (leafProperty.isCollectionLike()) {
+			PersistentPropertyPath<RelationalPersistentProperty> pathToId = extPath //
+					.extendBy(requiredIdProperty) //
+					.getRequiredPersistentPropertyPath();
 
-			if (Set.class.isAssignableFrom(leafProperty.getType())) {
-				setIdInElementOfSet(converter, action, generatedId, (Set) currentPropertyValue);
-			} else {
-				throw new IllegalStateException("Can't handle " + currentPropertyValue);
-			}
-		} else if (extPath.hasIdProperty()) {
-
-			RelationalPersistentProperty requiredIdProperty = context
-					.getRequiredPersistentEntity(propertyPathToEntity.getRequiredLeafProperty().getActualType())
-					.getRequiredIdProperty();
-
-			PersistentPropertyPath<RelationalPersistentProperty> pathToId = context.getPersistentPropertyPath(
-					propertyPathToEntity.toDotPath() + '.' + requiredIdProperty.getName(),
-					propertyPathToEntity.getBaseProperty().getOwner().getType());
-
-			propertyAccessor.setProperty(pathToId, generatedId);
+			Object convertedId = converter.readValue(generatedId, requiredIdProperty.getTypeInformation());
+			propertyAccessor.setProperty(pathToId, convertedId, traversalContext);
 		}
 	}
 
+	private static TraversalContext createTraversalContext(DbAction.WithDependingOn<?> action) {
+
+		TraversalContext traversalContext = new TraversalContext();
+		addQualifiers(action, traversalContext);
+		return traversalContext;
+	}
+
+	private static void addQualifiers(DbAction.WithDependingOn<?> action, TraversalContext traversalContext) {
+
+		Map<PersistentPropertyPath<RelationalPersistentProperty>, Object> qualifiers = action.getQualifiers();
+
+		for (Map.Entry<PersistentPropertyPath<RelationalPersistentProperty>, Object> persistentPropertyPathObjectEntry : qualifiers
+				.entrySet()) {
+
+			DbAction.WithEntity<?> parentAction = action.getDependingOn();
+
+			if (parentAction instanceof DbAction.WithDependingOn) {
+				addQualifiers((DbAction.WithDependingOn<?>) parentAction, traversalContext);
+			}
+
+			RelationalPersistentProperty leafProperty = persistentPropertyPathObjectEntry.getKey().getRequiredLeafProperty();
+
+			HandlerFactory.registerHandlerFor(traversalContext, leafProperty, persistentPropertyPathObjectEntry.getValue());
+		}
+
+		RelationalPersistentProperty requiredLeafProperty = action.getPropertyPath().getRequiredLeafProperty();
+		if (Set.class.isAssignableFrom(requiredLeafProperty.getRawType())) {
+
+			traversalContext.registerSetHandler( //
+					requiredLeafProperty, //
+					SET_HANDLER.readHandler(action.getEntity()), //
+					SET_HANDLER.writeHandler(action.getEntity()).andThen(o -> (Set) o) //
+			);
+		}
+	}
 
 	public void setEntity(@Nullable T aggregateRoot) {
 		entity = aggregateRoot;
-	}
-
-	@SuppressWarnings("unchecked")
-	private static <T> void setIdInElementOfSet(RelationalConverter converter, DbAction.WithDependingOn<?> action,
-			Object generatedId, Set<T> set) {
-
-		PersistentPropertyAccessor<?> intermediateAccessor = setId(converter, action, generatedId);
-
-		// this currently only works on the standard collections
-		// no support for immutable collections, nor specialized ones.
-		set.remove((T) action.getEntity());
-		set.add((T) intermediateAccessor.getBean());
-	}
-
-	@SuppressWarnings("unchecked")
-	private static <K, V> void setIdInElementOfMap(RelationalConverter converter, DbAction.WithDependingOn<?> action,
-			Object generatedId, Map<K, V> map, K keyObject) {
-
-		PersistentPropertyAccessor<?> intermediateAccessor = setId(converter, action, generatedId);
-
-		// this currently only works on the standard collections
-		// no support for immutable collections, nor specialized ones.
-		map.put(keyObject, (V) intermediateAccessor.getBean());
-	}
-
-	@SuppressWarnings("unchecked")
-	private static <T> void setIdInElementOfList(RelationalConverter converter, DbAction.WithDependingOn<?> action,
-			Object generatedId, List<T> list, int index) {
-
-		PersistentPropertyAccessor<?> intermediateAccessor = setId(converter, action, generatedId);
-
-		// this currently only works on the standard collections
-		// no support for immutable collections, nor specialized ones.
-		list.set(index, (T) intermediateAccessor.getBean());
-	}
-
-	/**
-	 * Sets the id of the entity referenced in the action and uses the {@link PersistentPropertyAccessor} used for that.
-	 */
-	private static <T> PersistentPropertyAccessor<T> setId(RelationalConverter converter,
-			DbAction.WithDependingOn<T> action, Object generatedId) {
-
-		T originalElement = action.getEntity();
-
-		RelationalPersistentEntity<T> persistentEntity = (RelationalPersistentEntity<T>) converter.getMappingContext()
-				.getRequiredPersistentEntity(action.getEntityType());
-		PersistentPropertyAccessor<T> intermediateAccessor = converter.getPropertyAccessor(persistentEntity,
-				originalElement);
-
-		RelationalPersistentProperty idProperty = persistentEntity.getIdProperty();
-		if (idProperty != null) {
-			intermediateAccessor.setProperty(idProperty, generatedId);
-		}
-
-		return intermediateAccessor;
 	}
 
 	@SuppressWarnings("unchecked")
@@ -227,5 +195,87 @@ public class AggregateChange<T> {
 		 * A {@code DELETE} of an aggregate typically involves a {@code delete} on all contained entities.
 		 */
 		DELETE
+	}
+
+	enum HandlerFactory {
+
+		LIST_HANDLER(List.class) {
+			@Override
+			Function<Object, Object> readHandler(Object key) {
+				return collection -> ((List) collection).get((Integer) key);
+			}
+
+			@SuppressWarnings("unchecked")
+			@Override
+			BiFunction<Object, Object, Object> writeHandler(Object key) {
+				return (collection, newValue) -> ((List) collection).set((Integer) key, newValue);
+			}
+		},
+
+		MAP_HANDLER(Map.class) {
+			@Override
+			Function<Object, Object> readHandler(Object key) {
+				return collection -> ((Map) collection).get(key);
+			}
+
+			@SuppressWarnings("unchecked")
+			@Override
+			BiFunction<Object, Object, Object> writeHandler(Object key) {
+				return (collection, newValue) -> ((Map) collection).put(key, newValue);
+			}
+		},
+
+		SET_HANDLER(Set.class) {
+			@Override
+			Function<Object, Object> readHandler(Object key) {
+				return collection -> key;
+			}
+
+			@SuppressWarnings("unchecked")
+			@Override
+			BiFunction<Object, Object, Object> writeHandler(Object key) {
+				return (collection, newValue) -> {
+					Set set = (Set) collection;
+					if (key != newValue) {
+						set.remove(key);
+						set.add(newValue);
+					}
+					return collection;
+				};
+			}
+		};
+
+		final Class<?> handledType;
+
+		abstract Function<Object, Object> readHandler(Object key);
+
+		abstract BiFunction<Object, Object, Object> writeHandler(Object key);
+
+		HandlerFactory(Class handledType) {
+			this.handledType = handledType;
+		}
+
+		static void registerHandlerFor(TraversalContext context, PersistentProperty property, Object key) {
+
+			Class type = property.getType();
+			HandlerFactory handlerFactory = findHandlerFactory(type);
+
+			if (handlerFactory == null) {
+				return;
+			}
+			context.registerHandler(property, handlerFactory.readHandler(key), handlerFactory.writeHandler(key));
+		}
+
+		@Nullable
+		private static HandlerFactory findHandlerFactory(Class<?> type) {
+
+			for (HandlerFactory factory : HandlerFactory.values()) {
+
+				if (type.isAssignableFrom(factory.handledType)) {
+					return factory;
+				}
+			}
+			return null;
+		}
 	}
 }
